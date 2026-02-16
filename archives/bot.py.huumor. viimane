@@ -1,0 +1,256 @@
+import discord
+from discord import app_commands
+import aiohttp
+import asyncio
+import os
+import re
+from collections import defaultdict
+from time import time, strftime
+
+from config import DISCORD_TOKEN, DATA_PATH, PROMPT_FILE
+
+# ────────────────────────────────────────────────
+# BASIC GLOBALS
+# ────────────────────────────────────────────────
+COOLDOWN_SEC = 25
+LAST_USE = defaultdict(float)
+
+MEMORY_DIR = "blt_memory"
+os.makedirs(MEMORY_DIR, exist_ok=True)
+
+MAX_CONTEXT_CHARS = 2200
+MAX_REPLY = 1900
+MAX_CHAT_MEMORY = 1500
+
+SAVE_FILES = {
+    "bt": "bt.txt",
+    "calendar": "calendar.txt",
+    "vikings": "vikings.txt",
+    "kvk": "kvk.txt"
+}
+
+MENTION_RE = re.compile(r"<@!?(\d+)>")
+
+# ────────────────────────────────────────────────
+# LOAD SYSTEM PROMPT
+# ────────────────────────────────────────────────
+def load_system_prompt():
+    if not os.path.exists(PROMPT_FILE):
+        return (
+            "You are BLT-bot, a philosophical, humorous, tactically sharp MadOS fork. "
+            "You respond with clarity, dry humor, strategic thinking, and no nonsense."
+        )
+    with open(PROMPT_FILE, "r", encoding="utf-8") as f:
+        return f.read()
+
+SYSTEM_PROMPT = load_system_prompt()
+
+# ────────────────────────────────────────────────
+# MEMORY SYSTEM (per-user)
+# ────────────────────────────────────────────────
+def mem_path(uid):
+    return os.path.join(MEMORY_DIR, f"{uid}.txt")
+
+def load_memory(uid):
+    path = mem_path(uid)
+    if not os.path.exists(path):
+        return ""
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()[-MAX_CHAT_MEMORY:]
+
+def save_memory(uid, text):
+    """Aggressive compression: only last 1500 chars kept."""
+    text = MENTION_RE.sub("", text).strip()
+    path = mem_path(uid)
+
+    existing = ""
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            existing = f.read()
+
+    new = (existing + "\n" + text)[-MAX_CHAT_MEMORY:]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(new)
+
+# ────────────────────────────────────────────────
+# SAVE BT / CALENDAR / VIKINGS / KVK
+# ────────────────────────────────────────────────
+def save_result(group, result):
+    fname = SAVE_FILES.get(group)
+    if not fname:
+        return
+    path = os.path.join(DATA_PATH, fname)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(result)
+
+# ────────────────────────────────────────────────
+# CONTEXT BUILDER (reads existing txt files)
+# ────────────────────────────────────────────────
+def build_context(max_files=4):
+    ctx = SYSTEM_PROMPT + "\n\n=== BLT DATA ===\n"
+
+    if not os.path.exists(DATA_PATH):
+        return ctx
+
+    files = sorted(
+        [f for f in os.listdir(DATA_PATH)
+         if os.path.isfile(os.path.join(DATA_PATH, f))],
+        key=lambda x: os.path.getmtime(os.path.join(DATA_PATH, x)),
+        reverse=True
+    )[:max_files]
+
+    used = 0
+    for fname in files:
+        if used >= MAX_CONTEXT_CHARS:
+            ctx += "\n--- CONTEXT TRUNCATED ---\n"
+            break
+
+        path = os.path.join(DATA_PATH, fname)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                txt = f.read()
+                piece = txt[:1000]
+                ctx += f"\n--- {fname} ---\n{piece}\n"
+                used += len(piece)
+        except:
+            pass
+
+    return ctx
+
+# ────────────────────────────────────────────────
+# QWEN REQUEST
+# ────────────────────────────────────────────────
+async def ask_qwen(prompt):
+    payload = {
+        "prompt": prompt,
+        "n_predict": 260,
+        "temperature": 0.48,
+        "top_k": 35,
+        "top_p": 0.92,
+        "min_p": 0.06,
+        "repeat_penalty": 1.12,
+        "cache_prompt": True,
+        "stop": ["<|im_end|>", "</s>", "User:"]
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "http://127.0.0.1:8080/completion",
+                json=payload,
+                timeout=60
+            ) as resp:
+                data = await resp.json()
+                return data.get("content", "").strip()
+    except Exception as e:
+        return f"⚠️ Qwen error: {str(e)[:150]}"
+
+# ────────────────────────────────────────────────
+# DISCORD BOT SETUP
+# ────────────────────────────────────────────────
+intents = discord.Intents.default()
+intents.message_content = True
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
+
+# ────────────────────────────────────────────────
+# COOLDOWN helper
+# ────────────────────────────────────────────────
+async def check_cd(inter):
+    now = time()
+    uid = inter.user.id
+    if now - LAST_USE[uid] < COOLDOWN_SEC:
+        await inter.response.send_message(
+            f"⏳ Cooldown ~{COOLDOWN_SEC}s",
+            ephemeral=True
+        )
+        return True
+    LAST_USE[uid] = now
+    return False
+
+# ────────────────────────────────────────────────
+# SLASH COMMANDS (all saving included)
+# ────────────────────────────────────────────────
+
+@tree.command(name="bt", description="Latest Bear Trap summary")
+async def bt(inter):
+    if await check_cd(inter): return
+    await inter.response.defer(thinking=True)
+
+    ctx = build_context()
+    prompt = f"{ctx}\n\nProvide latest Bear Trap summary."
+    out = await ask_qwen(prompt)
+
+    save_result("bt", out)
+    await inter.followup.send(out[:MAX_REPLY])
+
+
+@tree.command(name="calendar", description="Event calendar")
+async def calendar(inter):
+    if await check_cd(inter): return
+    await inter.response.defer(thinking=True)
+
+    ctx = build_context()
+    prompt = f"{ctx}\n\nList the event calendar."
+    out = await ask_qwen(prompt)
+
+    save_result("calendar", out)
+    await inter.followup.send(out[:MAX_REPLY])
+
+
+@tree.command(name="vikings", description="Vikings info")
+async def vikings(inter):
+    if await check_cd(inter): return
+    await inter.response.defer(thinking=True)
+
+    ctx = build_context()
+    prompt = f"{ctx}\n\nSummarize Vikings activity."
+    out = await ask_qwen(prompt)
+
+    save_result("vikings", out)
+    await inter.followup.send(out[:MAX_REPLY])
+
+
+@tree.command(name="kvk", description="KvK info")
+async def kvk(inter):
+    if await check_cd(inter): return
+    await inter.response.defer(thinking=True)
+
+    ctx = build_context()
+    prompt = f"{ctx}\n\nProvide KvK history and insights."
+    out = await ask_qwen(prompt)
+
+    save_result("kvk", out)
+    await inter.followup.send(out[:MAX_REPLY])
+
+
+@tree.command(name="chat", description="Chat with MadOS BLT-bot")
+async def chat(inter, message: str):
+    if await check_cd(inter): return
+    await inter.response.defer(thinking=True)
+
+    memory = load_memory(inter.user.id)
+    clean = MENTION_RE.sub("", message).strip()
+
+    ctx = build_context()
+    prompt = (
+        f"{ctx}\n\n"
+        f"Previous memory:\n{memory}\n\n"
+        f"User says (philosophical, humorous tone allowed): {clean}"
+    )
+
+    out = await ask_qwen(prompt)
+    save_memory(inter.user.id, f"[{strftime('%H:%M:%S')}] {clean}\nBOT: {out}")
+
+    await inter.followup.send(out[:MAX_REPLY])
+
+# ────────────────────────────────────────────────
+# STARTUP
+# ────────────────────────────────────────────────
+@client.event
+async def on_ready():
+    print(f"Logged in as {client.user}")
+    await tree.sync()
+    print("Slash commands synced.")
+
+client.run(DISCORD_TOKEN)

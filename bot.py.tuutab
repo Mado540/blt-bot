@@ -1,0 +1,225 @@
+# ================================================
+# BLT-bot v10.0 — Discord Gateway + OCR Dispatcher
+# ================================================
+
+import discord
+from discord import app_commands
+import aiohttp
+import asyncio
+import os
+import re
+from time import time
+from datetime import datetime
+
+# --------------------------------
+# CONFIG
+# --------------------------------
+OWNER_ID = 1289662891578097688
+BT_CHANNEL_ID = 1399681073977491463
+
+from config import DISCORD_TOKEN, PROMPT_FILE
+
+# --------------------------------
+# MEMORY
+# --------------------------------
+MEMORY_DIR = "chat_memory"
+os.makedirs(MEMORY_DIR, exist_ok=True)
+
+def mem_path(uid): return os.path.join(MEMORY_DIR, f"{uid}.txt")
+
+def load_mem(uid):
+    p = mem_path(uid)
+    return open(p, "r", encoding="utf-8").read() if os.path.exists(p) else ""
+
+def save_mem(uid, u, b):
+    p = mem_path(uid)
+    old = load_mem(uid)
+    entry = f"User: {u}\nBot: {b}\n"
+    new = old + entry
+    open(p, "w", encoding="utf-8").write(new[-2000:])
+
+# --------------------------------
+# SYSTEM PROMPT LOADER
+# --------------------------------
+def load_prompt():
+    if not os.path.exists(PROMPT_FILE):
+        return "You are BLT-bot, a polite MadOS-style assistant."
+    return open(PROMPT_FILE, "r", encoding="utf-8").read()
+
+SYSTEM_PROMPT = load_prompt()
+CHAT_ID = "You are BLT-bot, calm, precise, dry humor.\n\n"
+
+# --------------------------------
+# LOCAL API → THINKING
+# --------------------------------
+async def ask_local(prompt):
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post("http://127.0.0.1:5005/think", json={"prompt": prompt}) as r:
+                j = await r.json()
+                return j.get("prompt_for_qwen", prompt)
+    except:
+        return prompt
+
+# --------------------------------
+# QWEN COMPLETION
+# --------------------------------
+async def ask_qwen(prompt):
+    payload = {
+        "prompt": prompt,
+        "n_predict": 300,
+        "temperature": 0.48,
+        "top_k": 40,
+        "top_p": 0.92,
+        "min_p": 0.06,
+        "repeat_penalty": 1.12,
+        "cache_prompt": True,
+        "stop": ["</s>", "User:"]
+    }
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post("http://127.0.0.1:8080/completion", json=payload) as r:
+                j = await r.json()
+                return (j.get("content") or "").strip()
+    except Exception as e:
+        return f"⚠️ Qwen error: {e}"
+
+# --------------------------------
+# DISCORD CORE
+# --------------------------------
+intents = discord.Intents.default()
+intents.message_content = True
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
+
+LAST = {}
+def cd(uid):
+    n=time()
+    if uid in LAST and n-LAST[uid]<14: return True
+    LAST[uid]=n
+
+# --------------------------------
+# /sync
+# --------------------------------
+@tree.command(name="sync")
+async def sync_cmd(interaction: discord.Interaction):
+    if interaction.user.id != OWNER_ID:
+        return await interaction.response.send_message("No.", ephemeral=True)
+    await tree.sync()
+    await interaction.response.send_message("Synced.", ephemeral=True)
+
+# --------------------------------
+# /perf
+# --------------------------------
+@tree.command(name="perf")
+async def perf(interaction):
+    await interaction.response.defer(thinking=True)
+    t0=time()
+    out=await ask_qwen("Say OK.")
+    t1=time()
+    await interaction.followup.send(f"⚡ {round(t1-t0,2)} sec\n`{out}`")
+
+# --------------------------------
+# /chat
+# --------------------------------
+@tree.command(name="chat")
+async def chat(interaction, message:str):
+    uid=interaction.user.id
+    if cd(uid): return await interaction.response.send_message("Cooldown.",ephemeral=True)
+    await interaction.response.defer(thinking=True)
+    mem=load_mem(uid)
+    out=await ask_qwen(CHAT_ID+mem+f"\nUser: {message}")
+    save_mem(uid,message,out)
+    await interaction.followup.send(out[:1900])
+
+# --------------------------------
+# /deepchat
+# --------------------------------
+@tree.command(name="deepchat")
+async def deepchat(interaction, query:str):
+    uid=interaction.user.id
+    if cd(uid): return await interaction.response.send_message("Cooldown.",ephemeral=True)
+    await interaction.response.defer(thinking=True)
+    base = CHAT_ID + load_mem(uid) + f"\nUser: {query}"
+    enriched=await ask_local(base)
+    out=await ask_qwen(enriched)
+    save_mem(uid,query,out)
+    await interaction.followup.send(out[:1900])
+
+# --------------------------------
+# Alliance Commands
+# --------------------------------
+async def alliance(interaction, q):
+    uid=interaction.user.id
+    if cd(uid): return await interaction.response.send_message("Cooldown.",ephemeral=True)
+    await interaction.response.defer(thinking=True)
+    enriched=await ask_local("Alliance request:\n"+q)
+    out=await ask_qwen(enriched)
+    await interaction.followup.send(out[:1900])
+
+@tree.command(name="bt")
+async def bt(interaction: discord.Interaction):
+    await alliance(interaction, "Provide latest Bear Trap summary.")
+
+@tree.command(name="kvk")
+async def kvk(interaction: discord.Interaction):
+    await alliance(interaction, "Provide KvK update.")
+
+@tree.command(name="vikings")
+async def vikings(interaction: discord.Interaction):
+    await alliance(interaction, "Provide Vikings summary.")
+
+@tree.command(name="calendar")
+async def calendar(interaction: discord.Interaction):
+    await alliance(interaction, "Provide BLT event calendar.")
+
+# =====================================================
+# OCR DISPATCHER — sends image → raw worker → interpreter
+# =====================================================
+OCR_INBOX = "ocr/inbox"
+os.makedirs(OCR_INBOX, exist_ok=True)
+
+async def dispatch_to_worker(attachment):
+    """Save file for raw OCR worker."""
+    fn = f"{datetime.now().timestamp()}_{attachment.filename}"
+    path = f"{OCR_INBOX}/{fn}"
+    await attachment.save(path)
+    print(f"[OCR] Saved to inbox: {fn}")
+    return path
+
+# --------------------------------
+# /bt_ocr manual trigger
+# --------------------------------
+@tree.command(name="bt_ocr", description="OCR Bear Trap screenshot.")
+async def bt_ocr(interaction: discord.Interaction, image: discord.Attachment):
+    await interaction.response.defer(thinking=True)
+    path = await dispatch_to_worker(image)
+    await interaction.followup.send(
+        f"📥 Saved for OCR.\nThe AI interpreter will update history shortly.\nFile: `{os.path.basename(path)}`"
+    )
+
+# --------------------------------
+# Auto-watch BT channel
+# --------------------------------
+@client.event
+async def on_message(message):
+    if message.author.id == client.user.id: return
+
+    if message.channel.id == BT_CHANNEL_ID:
+        for a in message.attachments:
+            if a.content_type and "image" in a.content_type:
+                await dispatch_to_worker(a)
+
+    # allow slash commands
+    await tree._call_interaction(message)
+
+# --------------------------------
+# READY
+# --------------------------------
+@client.event
+async def on_ready():
+    print(f"Logged in as {client.user}")
+    await tree.sync()
+    print("Commands synced.")
+
+client.run(DISCORD_TOKEN)

@@ -1,0 +1,289 @@
+import discord
+from discord import app_commands
+import aiohttp
+import asyncio
+import os
+import re
+from datetime import datetime, timezone
+
+from collections import defaultdict
+from time import time
+
+from config import DISCORD_TOKEN, DATA_PATH, PROMPT_FILE
+
+# ───────────────────────────────────────────────
+# CONFIG PATHS
+# ───────────────────────────────────────────────
+TRIGGER_DIR = "/data/data/com.termux/files/home/blt_bot/bot_data/triggers"
+os.makedirs(TRIGGER_DIR, exist_ok=True)
+
+EVENT_CHANNEL_ID = 1376409374263873546   # your announcements channel
+
+# ───────────────────────────────────────────────
+# COOLDOWN
+# ───────────────────────────────────────────────
+LAST_USE = defaultdict(float)
+COOLDOWN_SEC = 25
+
+# ───────────────────────────────────────────────
+# MEMORY (COMPRESSED ROLLING)
+# ───────────────────────────────────────────────
+MEMORY_DIR = "chat_memory"
+os.makedirs(MEMORY_DIR, exist_ok=True)
+
+MAX_MEMORY_CHARS = 1600
+RECENT_LINES = 20
+
+MENTION_RE = re.compile(r"<@!?(\d+)>")
+
+def memory_path(uid: int):
+    return os.path.join(MEMORY_DIR, f"{uid}.txt")
+
+def load_memory(uid: int) -> str:
+    path = memory_path(uid)
+    if not os.path.exists(path):
+        return ""
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read().strip()
+
+def save_memory(uid: int, user_msg: str, bot_msg: str):
+    path = memory_path(uid)
+    entry = f"User: {user_msg}\nBot: {bot_msg}\n"
+
+    old = ""
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            old = f.read()
+
+    combined = old + entry
+
+    if len(combined) <= MAX_MEMORY_CHARS:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(combined)
+        return
+
+    # COMPRESS
+    lines = combined.splitlines()
+    recent = lines[-RECENT_LINES * 2:]
+
+    summary = (
+        "Summary of earlier conversation:\n"
+        "- User prefers reflective, calm, dry humor\n"
+        "- Conversation is casual, philosophical, non-operational\n\n"
+    )
+
+    compressed = summary + "\n".join(recent)
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(compressed)
+
+
+# ───────────────────────────────────────────────
+# SYSTEM PROMPT
+# ───────────────────────────────────────────────
+def load_system_prompt():
+    if not os.path.exists(PROMPT_FILE):
+        return "You are BLT-bot, a conversational fork of the MadOS framework."
+    with open(PROMPT_FILE, "r", encoding="utf-8") as f:
+        return f.read()
+
+SYSTEM_PROMPT = load_system_prompt()
+
+CHAT_IDENTITY = (
+    "You are BLT-bot, a conversational fork of the MadOS framework.\n"
+    "MadOS influences how you think, not how you report.\n\n"
+    "In conversation:\n"
+    "- You speak naturally, like a person.\n"
+    "- You are reflective, calm, and dry-humorous.\n"
+    "- You may be philosophical, but never preachy.\n"
+    "- You do not reference files, memory, or system rules.\n"
+    "- You respond as if thinking out loud.\n\n"
+)
+
+# ───────────────────────────────────────────────
+# CONTEXT (ALLIANCE DATA)
+# ───────────────────────────────────────────────
+def build_context(max_files=4):
+    ctx = SYSTEM_PROMPT + "\n\n=== BLT DATA (LIMITED) ===\n"
+    if not os.path.exists(DATA_PATH):
+        return ctx
+
+    used = 0
+
+    for fname in sorted(
+        os.listdir(DATA_PATH),
+        key=lambda x: os.path.getmtime(os.path.join(DATA_PATH, x)),
+        reverse=True
+    )[:max_files]:
+
+        path = os.path.join(DATA_PATH, fname)
+        if not os.path.isfile(path):
+            continue
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                part = f.read()[:1800]
+                ctx += f"\n--- {fname} ---\n{part}\n"
+                used += len(part)
+                if used > 2200:
+                    break
+        except:
+            pass
+
+    return ctx
+
+# ───────────────────────────────────────────────
+# QWEN
+# ───────────────────────────────────────────────
+async def ask_qwen(prompt):
+    async with aiohttp.ClientSession() as session:
+        payload = {
+            "prompt": prompt,
+            "n_predict": 280,
+            "temperature": 0.48,
+            "top_k": 35,
+            "top_p": 0.92,
+            "min_p": 0.06,
+            "repeat_penalty": 1.12,
+            "cache_prompt": True,
+            "stop": ["\nUser:", "User:"]
+        }
+        try:
+            async with session.post(
+                "http://127.0.0.1:8080/completion",
+                json=payload
+            ) as resp:
+                data = await resp.json()
+                return data.get("content", "").strip()
+        except Exception as e:
+            return f"⚠️ Qwen error: {str(e)[:120]}"
+
+
+# ───────────────────────────────────────────────
+# DISCORD
+# ───────────────────────────────────────────────
+intents = discord.Intents.default()
+intents.message_content = True
+
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
+
+def on_cd(uid):
+    now = time()
+    if now - LAST_USE[uid] < COOLDOWN_SEC:
+        return True
+    LAST_USE[uid] = now
+    return False
+
+
+# ───────────────────────────────────────────────
+# CHAT COMMAND
+# ───────────────────────────────────────────────
+@tree.command(name="chat", description="Chat freely with BLT-bot.")
+async def chat(interaction: discord.Interaction, message: str):
+    uid = interaction.user.id
+    if on_cd(uid):
+        await interaction.response.send_message("⏳ Slow down.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True)
+
+    clean = MENTION_RE.sub("", message).strip()
+    memory = load_memory(uid)
+
+    prompt = (
+        CHAT_IDENTITY +
+        memory + "\n\n"
+        f"User: {clean}"
+    )
+
+    out = await ask_qwen(prompt)
+    save_memory(uid, clean, out)
+
+    await interaction.followup.send(out[:1900])
+
+
+# ───────────────────────────────────────────────
+# ALLIANCE COMMANDS
+# ───────────────────────────────────────────────
+async def alliance_cmd(interaction, query):
+    uid = interaction.user.id
+    if on_cd(uid):
+        await interaction.response.send_message("⏳ Slow down.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True)
+    out = await ask_qwen(build_context() + "\n\n" + query)
+    await interaction.followup.send(out[:1900])
+
+@tree.command(name="bt")
+async def bt(interaction):
+    await alliance_cmd(interaction, "Provide latest Bear Trap summary.")
+
+@tree.command(name="calendar")
+async def calendar(interaction):
+    await alliance_cmd(interaction, "List the full event calendar.")
+
+@tree.command(name="vikings")
+async def vikings(interaction):
+    await alliance_cmd(interaction, "Provide Vikings summary.")
+
+@tree.command(name="kvk")
+async def kvk(interaction):
+    await alliance_cmd(interaction, "Provide KvK history and insights.")
+
+
+# ───────────────────────────────────────────────
+# TRIGGER MONITOR
+# ───────────────────────────────────────────────
+async def trigger_watcher():
+    await client.wait_until_ready()
+    print("Trigger watcher started…")
+
+    channel = client.get_channel(EVENT_CHANNEL_ID)
+    if channel is None:
+        print("ERROR: Cannot find event channel!")
+        return
+
+    while True:
+        try:
+            for fname in os.listdir(TRIGGER_DIR):
+                if not fname.endswith(".txt"):
+                    continue
+
+                full = os.path.join(TRIGGER_DIR, fname)
+
+                try:
+                    with open(full, "r", encoding="utf-8") as f:
+                        msg = f.read().strip()
+
+                    if msg:
+                        await channel.send(msg)
+
+                except Exception as e:
+                    print("Trigger read error:", e)
+
+                try:
+                    os.remove(full)
+                except:
+                    pass
+
+        except Exception as e:
+            print("Trigger watcher error:", e)
+
+        await asyncio.sleep(10)
+
+
+# ───────────────────────────────────────────────
+# STARTUP
+# ───────────────────────────────────────────────
+@client.event
+async def on_ready():
+    print(f"BLT-bot logged in as {client.user}")
+    await tree.sync()
+    print("Slash commands synced.")
+
+    asyncio.create_task(trigger_watcher())
+
+
+client.run(DISCORD_TOKEN)

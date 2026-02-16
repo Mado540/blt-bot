@@ -1,0 +1,9 @@
+Bear Trap Doctrine:
+- GREEN leaders: mados, MilkTea, PEiPEi, Call me Al.
+- YELLOW leaders: JellyFlakes, Nebroy16, Stephan, BiGJaYHeN.
+- RED leaders: <none listed yet>.
+- Start with only GREEN rallies at T=0:00.
+- YELLOW launches at T=+1:00–1:30.
+- RED launches only if idle squads exist at T=+2:30–3:00.
+- BT has no stamina cost; limiting factor is rally reuse.
+- Always recycle top 2–3 squads (Tier S).

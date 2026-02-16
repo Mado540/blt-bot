@@ -1,0 +1,21 @@
+Bear Trap Strategy Notes (BT1 & BT2)
+
+- BT1 usually occurs at night; BT2 during daytime.
+- Goal: maximize BEAR DAMAGE and squad recycling.
+
+General Tactics:
+• Green leaders launch immediately at T=0:00.
+• Yellow leaders wait 1:00–1:30 to allow squad reuse.
+• Red leaders launch only if squads are idle.
+
+Efficiency Principles:
+• No stamina cost — slot management matters more than troop loss.
+• Always refill rallies instantly; speed matters more than power.
+
+Alliance Dynamics:
+• BT1 often has fewer online players; emphasize compact rally teams.
+• BT2 has more players; allow wider participation.
+
+Draft Style:
+• Monthly rotation adjustments.
+• Shortest possible instructions for announcements.

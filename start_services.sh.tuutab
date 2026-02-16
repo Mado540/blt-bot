@@ -1,0 +1,85 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -e
+
+echo "=== Inside tmux: BLT-bot v10.3 ==="
+echo "Date: $(date)"
+echo "----------------------------------------"
+
+BASE="/data/data/com.termux/files/home/blt_bot"
+LOGS="$BASE/logs"
+
+mkdir -p "$LOGS"
+
+###########################################
+# 1) QWEN SERVER
+###########################################
+echo "[1/5] Starting Qwen (llama-server)..."
+
+$BASE/../llama.cpp/build/bin/llama-server \
+  -m /data/data/com.termux/files/home/models/Qwen2.5-3B-Instruct-Q4_K_M.gguf \
+  -c 2048 -t 6 --parallel 2 --cont-batching --mlock --no-mmap --port 8080 \
+  >> "$LOGS/qwen.log" 2>&1 &
+
+QWEN_PID=$!
+sleep 2
+echo "Qwen running (PID $QWEN_PID)"
+
+###########################################
+# 2) LOCAL API
+###########################################
+echo "[2/5] Starting Local API..."
+
+cd "$BASE/local_api"
+python3 api.py >> "$LOGS/api.log" 2>&1 &
+
+API_PID=$!
+sleep 1
+echo "Local API running (PID $API_PID)"
+
+###########################################
+# 3) RAW OCR WORKER
+###########################################
+echo "[3/5] Starting RAW OCR worker..."
+
+cd "$BASE/ocr"
+python3 worker.py >> "$LOGS/worker_raw.log" 2>&1 &
+
+WRAW_PID=$!
+sleep 1
+echo "RAW OCR worker running (PID $WRAW_PID)"
+
+###########################################
+# 4) AI INTERPRETER
+###########################################
+echo "[4/5] Starting AI Interpreter..."
+
+cd "$BASE/ocr"
+python3 interpreter.py >> "$LOGS/worker_ai.log" 2>&1 &
+
+WAI_PID=$!
+sleep 1
+echo "AI Interpreter running (PID $WAI_PID)"
+
+###########################################
+# 5) BOT.PY
+###########################################
+echo "[5/5] Starting bot.py..."
+
+cd "$BASE"
+python3 bot.py >> "$LOGS/bot.log" 2>&1 &
+
+BOT_PID=$!
+sleep 1
+echo "bot.py running (PID $BOT_PID)"
+
+echo "----------------------------------------"
+echo "All services running in background."
+echo "Qwen:       $QWEN_PID"
+echo "Local API:  $API_PID"
+echo "OCR Raw:    $WRAW_PID"
+echo "OCR AI:     $WAI_PID"
+echo "Bot:        $BOT_PID"
+echo "----------------------------------------"
+echo "BLT-bot v10.3 is now operational."
+echo "Keeping session alive..."
+tail -f /dev/null

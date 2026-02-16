@@ -1,0 +1,4 @@
+KvK Doctrine:
+- Track kill counts, losses, and event timings.
+- Maintain reserve stamina for final push.
+- Coordinate R4 rallies to ensure uptime.

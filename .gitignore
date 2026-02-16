@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+
+# Env
+.env
+
+# Logs
+*.log
+logs/
+bot.log
+server.log
+api.log
+
+# OCR outputs
+ocr/processed/
+ocr_pipeline/processed/
+
+# OS
+.DS_Store
+
+# Temp
+*.tmp
+*.save

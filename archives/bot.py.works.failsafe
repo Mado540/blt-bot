@@ -1,0 +1,221 @@
+import discord
+from discord import app_commands
+import aiohttp
+import asyncio
+import os
+
+from collections import defaultdict
+from time import time
+
+from config import DISCORD_TOKEN, DATA_PATH, PROMPT_FILE
+
+# ────────────────────────────────────────────────
+# COOLDOWN GLOBALS
+# ────────────────────────────────────────────────
+LAST_USE = defaultdict(float)
+COOLDOWN_SEC = 25           # per-user cooldown – tune between 20–40 s
+
+# -------------------------------
+# LOAD SYSTEM PROMPT (MadOS Fork)
+# -------------------------------
+def load_system_prompt():
+    if not os.path.exists(PROMPT_FILE):
+        return "You are BLT-bot, based on MadOS principles."
+    with open(PROMPT_FILE, "r", encoding="utf-8") as f:
+        return f.read()
+
+SYSTEM_PROMPT = load_system_prompt()
+
+# Channels where BLT-bot should reply to normal messages
+ALLOWED_CHANNELS = {
+    1376409374263873546,   # Announcements
+    1399681073977491463,   # bt participants
+    1370832149170884780    # general
+}
+
+# -------------------------------
+# BUILD FULL CONTEXT (improved: newest files first, limit count)
+# -------------------------------
+def build_context(max_files=4):
+    context = SYSTEM_PROMPT + "\n\n=== BLT DATA (LIMITED) ===\n"
+
+    if not os.path.exists(DATA_PATH):
+        return context
+
+    max_chars = 2200
+    current = 0
+
+    # Get files sorted by modification time (newest first)
+    files = sorted(
+        [f for f in os.listdir(DATA_PATH) if os.path.isfile(os.path.join(DATA_PATH, f))],
+        key=lambda x: os.path.getmtime(os.path.join(DATA_PATH, x)),
+        reverse=True
+    )[:max_files]
+
+    for fname in files:
+        if current >= max_chars:
+            context += "\n--- CONTEXT TRUNCATED FOR SPEED ---\n"
+            break
+
+        path = os.path.join(DATA_PATH, fname)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+                add = text[:1800]  # per-file cap
+                context += f"\n--- {fname} ---\n{add}\n"
+                current += len(add)
+        except:
+            pass
+
+    return context
+
+# -------------------------------
+# QWEN VIA LLAMA SERVER
+# -------------------------------
+async def ask_qwen(prompt):
+    async with aiohttp.ClientSession() as session:
+        payload = {
+            "prompt": prompt,
+            # Slightly spicier but still phone-friendly
+            "n_predict": 280,
+            "temperature": 0.48,
+            "top_k": 35,
+            "top_p": 0.92,
+            "min_p": 0.06,          # helps small models stay focused
+            "repeat_penalty": 1.12,
+            "cache_prompt": True,
+            "stop": ["<|im_end|>", "</s>", "\nUser:", "User:"]
+        }
+
+        try:
+            async with session.post(
+                "http://127.0.0.1:8080/completion",
+                json=payload
+            ) as resp:
+                data = await resp.json()
+                return data.get("content", "No response from Qwen").strip()
+
+        except Exception as e:
+            return f"⚠️ Qwen is taking a nap: {str(e)[:120]}"
+
+# -------------------------------
+# DISCORD BOT SETUP
+# -------------------------------
+intents = discord.Intents.default()
+intents.message_content = True
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
+
+# -------------------------------
+# SLASH COMMANDS
+# -------------------------------
+
+@tree.command(name="bt", description="Show latest Bear Trap info.")
+async def bt(interaction: discord.Interaction):
+    now = time()
+    if now - LAST_USE[interaction.user.id] < COOLDOWN_SEC:
+        await interaction.response.send_message("⏳ Chill ~25s – phone is sweating", ephemeral=True, delete_after=10)
+        return
+    LAST_USE[interaction.user.id] = now
+
+    await interaction.response.defer(thinking=True)
+    prompt = build_context() + "\n\nProvide latest Bear Trap summary."
+    out = await ask_qwen(prompt)
+    safe_out = out[:1900] + ("…" if len(out) > 1900 else "")
+    await interaction.followup.send(safe_out)
+
+@tree.command(name="calendar", description="Show BLT event calendar.")
+async def calendar(interaction: discord.Interaction):
+    now = time()
+    if now - LAST_USE[interaction.user.id] < COOLDOWN_SEC:
+        await interaction.response.send_message("⏳ Chill ~25s – phone is sweating", ephemeral=True, delete_after=10)
+        return
+    LAST_USE[interaction.user.id] = now
+
+    await interaction.response.defer(thinking=True)
+    prompt = build_context() + "\n\nList the full event calendar."
+    out = await ask_qwen(prompt)
+    safe_out = out[:1900] + ("…" if len(out) > 1900 else "")
+    await interaction.followup.send(safe_out)
+
+@tree.command(name="vikings", description="Show Vikings info.")
+async def vikings(interaction: discord.Interaction):
+    now = time()
+    if now - LAST_USE[interaction.user.id] < COOLDOWN_SEC:
+        await interaction.response.send_message("⏳ Chill ~25s – phone is sweating", ephemeral=True, delete_after=10)
+        return
+    LAST_USE[interaction.user.id] = now
+
+    await interaction.response.defer(thinking=True)
+    prompt = build_context() + "\n\nProvide Vikings summary."
+    out = await ask_qwen(prompt)
+    safe_out = out[:1900] + ("…" if len(out) > 1900 else "")
+    await interaction.followup.send(safe_out)
+
+@tree.command(name="kvk", description="Show KvK info.")
+async def kvk(interaction: discord.Interaction):
+    now = time()
+    if now - LAST_USE[interaction.user.id] < COOLDOWN_SEC:
+        await interaction.response.send_message("⏳ Chill ~25s – phone is sweating", ephemeral=True, delete_after=10)
+        return
+    LAST_USE[interaction.user.id] = now
+
+    await interaction.response.defer(thinking=True)
+    prompt = build_context() + "\n\nProvide KvK history and insights."
+    out = await ask_qwen(prompt)
+    safe_out = out[:1900] + ("…" if len(out) > 1900 else "")
+    await interaction.followup.send(safe_out)
+
+@tree.command(name="chat", description="Chat with MadOS (general conversation).")
+async def chat(interaction: discord.Interaction, message: str):
+    now = time()
+    if now - LAST_USE[interaction.user.id] < COOLDOWN_SEC:
+        await interaction.response.send_message("⏳ Chill ~25s – phone is sweating", ephemeral=True, delete_after=10)
+        return
+    LAST_USE[interaction.user.id] = now
+
+    await interaction.response.defer(thinking=True)
+    prompt = f"{SYSTEM_PROMPT}\n\nUser: {message}"
+    result = await ask_qwen(prompt)
+    safe_result = result[:1900] + ("…" if len(result) > 1900 else "")
+    await interaction.followup.send(safe_result)
+
+# -------------------------------
+# NORMAL MESSAGE HANDLING
+# -------------------------------
+@client.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    if message.channel.id not in ALLOWED_CHANNELS:
+        return
+
+    # Require BOTH mention AND prefix to avoid spam
+    if client.user not in message.mentions and not message.content.lower().startswith("!blt"):
+        return
+
+    now = time()
+    if now - LAST_USE[message.author.id] < COOLDOWN_SEC:
+        await message.reply("⏳ Chill ~25s – phone is cooking", delete_after=10)
+        return
+    LAST_USE[message.author.id] = now
+
+    await message.channel.typing()
+
+    prompt = f"{SYSTEM_PROMPT}\n\nUser says: {message.content}"
+    response = await ask_qwen(prompt)
+
+    safe_response = response[:1800] + ("…" if len(response) > 1800 else "")
+    await message.reply(safe_response)
+
+# -------------------------------
+# STARTUP
+# -------------------------------
+@client.event
+async def on_ready():
+    print(f"BLT-bot logged in as {client.user}")
+    await tree.sync()
+    print("Slash commands synced.")
+
+client.run(DISCORD_TOKEN)

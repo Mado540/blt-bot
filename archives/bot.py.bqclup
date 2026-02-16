@@ -1,0 +1,212 @@
+import discord
+from discord import app_commands
+import asyncio
+import os
+import functools
+from llama_cpp import Llama 
+
+# Import configuration
+from config import DISCORD_TOKEN, ADMIN_USERS, DATA_PATH, PROMPT_FILE, MODEL_PATH
+
+# -------------------------------
+# INITIALIZE MADOS BRAIN
+# -------------------------------
+print("--- MADOS: INITIALIZING NEURAL PATHWAYS ---")
+
+if not os.path.exists(MODEL_PATH):
+    print(f"CRITICAL ERROR: Model not found at {MODEL_PATH}")
+    exit(1)
+
+print(f"Loading Model: {os.path.basename(MODEL_PATH)}...")
+
+# Initialize the model in RAM
+# n_ctx=2048 is standard. You can try 4096 if your phone handles it well.
+llm = Llama(
+    model_path=MODEL_PATH,
+    n_ctx=2048,       # Context window size
+    n_threads=4,      # Uses 4 CPU cores (leaves some for Discord)
+    verbose=False     # Reduces spam in console
+)
+
+print("--- MADOS: ONLINE. SYSTEM READY. ---")
+
+# -------------------------------
+# Helper: Load Roster & Ranks
+# -------------------------------
+def load_ranks():
+    ranks = {}
+    roster_file = os.path.join(DATA_PATH, "roster.txt")
+    if not os.path.exists(roster_file):
+        return ranks
+    
+    with open(roster_file, "r", encoding="utf-8") as f:
+        for line in f:
+            if "|" not in line: continue
+            name, rank = line.strip().split("|")
+            ranks[name.strip()] = rank.strip()
+    return ranks
+
+def is_admin_user(username):
+    ranks = load_ranks()
+    if username in ranks and ranks[username] in ("R4", "R5"):
+        return True
+    return username in ADMIN_USERS
+
+# -------------------------------
+# Helper: System Prompt & Context
+# -------------------------------
+def load_system_prompt():
+    if not os.path.exists(PROMPT_FILE):
+        return "You are a tactical advisor bot."
+    with open(PROMPT_FILE, "r", encoding="utf-8") as f:
+        return f.read()
+
+SYSTEM_PROMPT = load_system_prompt()
+
+def build_context():
+    context = SYSTEM_PROMPT + "\n\n=== BLT DATA ===\n"
+    if not os.path.exists(DATA_PATH): return context
+    
+    for fname in os.listdir(DATA_PATH):
+        path = os.path.join(DATA_PATH, fname)
+        if os.path.isdir(path):
+            context += f"\n[FOLDER: {fname}]\n"
+            for d in os.listdir(path):
+                try:
+                    with open(os.path.join(path, d), "r", encoding="utf-8") as df:
+                        context += f"\n--- {d} ---\n{df.read()}\n"
+                except: pass
+        else:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    context += f"\n--- {fname} ---\n{f.read()}\n"
+            except: pass
+    return context
+
+# -------------------------------
+# THREADED GENERATION (The Fix)
+# -------------------------------
+def blocking_generation(prompt):
+    """
+    Runs the heavy math in a separate thread.
+    This prevents the bot from freezing.
+    """
+    try:
+        response = llm.create_chat_completion(
+            messages=[
+                {"role": "system", "content": "You are MadOS, a tactical advisor."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=400,   # Limit response length to save time
+            temperature=0.7,
+            top_p=0.9
+        )
+        return response["choices"][0]["message"]["content"]
+    except Exception as e:
+        return f"Processing Error: {str(e)}"
+
+async def ask_qwen(prompt):
+    loop = asyncio.get_running_loop()
+    # Execute blocking_generation in a separate thread
+    result = await loop.run_in_executor(None, functools.partial(blocking_generation, prompt))
+    return result
+
+# -------------------------------
+# Bot Setup
+# -------------------------------
+intents = discord.Intents.default()
+intents.message_content = True
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
+
+# ======================================================================
+# Slash Commands
+# ======================================================================
+
+@tree.command(name="bt", description="Show latest Bear Trap info.")
+async def bt(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True) # Tells Discord to wait
+    
+    context = build_context()
+    prompt = context + "\n\nUser Request: Provide latest Bear Trap summary."
+    
+    result = await ask_qwen(prompt)
+    await interaction.followup.send(result)
+
+@tree.command(name="vikings", description="Show Vikings event history.")
+async def vikings(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    
+    context = build_context()
+    prompt = context + "\n\nUser Request: Provide Vikings summary."
+    
+    result = await ask_qwen(prompt)
+    await interaction.followup.send(result)
+
+@tree.command(name="kvk", description="Show KvK history.")
+async def kvk(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    
+    context = build_context()
+    prompt = context + "\n\nUser Request: Provide KvK history."
+    
+    result = await ask_qwen(prompt)
+    await interaction.followup.send(result)
+
+@tree.command(name="calendar", description="Show event calendar.")
+async def calendar(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    
+    context = build_context()
+    prompt = context + "\n\nUser Request: List the BLT event calendar."
+    
+    result = await ask_qwen(prompt)
+    await interaction.followup.send(result)
+
+@tree.command(name="announce", description="Create announcement (R4/R5).")
+async def announce(interaction: discord.Interaction, text: str):
+    if not is_admin_user(interaction.user.name):
+        await interaction.response.send_message("❌ Unauthorized.")
+        return
+    
+    await interaction.response.defer(thinking=True)
+    
+    context = build_context()
+    prompt = context + f"\n\nUser Request: Create announcement: {text}"
+    
+    result = await ask_qwen(prompt)
+    await interaction.followup.send(result)
+
+@tree.command(name="aar", description="Generate AAR (R4/R5).")
+async def aar(interaction: discord.Interaction):
+    if not is_admin_user(interaction.user.name):
+        await interaction.response.send_message("❌ Unauthorized.")
+        return
+    
+    await interaction.response.defer(thinking=True)
+    
+    context = build_context()
+    prompt = context + "\n\nUser Request: Produce After Action Review."
+    
+    result = await ask_qwen(prompt)
+    await interaction.followup.send(result)
+
+@tree.command(name="reload_data", description="Reload data (R4/R5).")
+async def reload_data(interaction: discord.Interaction):
+    if not is_admin_user(interaction.user.name):
+        await interaction.response.send_message("❌ Unauthorized.")
+        return
+    global SYSTEM_PROMPT
+    SYSTEM_PROMPT = load_system_prompt()
+    await interaction.response.send_message("🔄 Data reloaded.")
+
+# -------------------------------
+# Startup
+# -------------------------------
+@client.event
+async def on_ready():
+    print(f"BLT-bot logged in as {client.user}")
+    await tree.sync()
+    print("Slash commands synced. MadOS Active.")
+
+client.run(DISCORD_TOKEN)

@@ -1,0 +1,5 @@
+Stamina Doctrine:
+- Diana improves stamina efficiency at low-parallel rally usage.
+- Use Diana early in Defeat Nearby Beasts/Terror events.
+- Diana reduces risk of running out of stamina before 80 points.
+- Intel drain must be monitored separately; Diana cannot offset Intel spent.

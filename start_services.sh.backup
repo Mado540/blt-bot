@@ -1,0 +1,88 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -e
+
+# ======================================================
+# BLT-bot Service Launcher — v3
+# Runs inside tmux and starts:
+#  1) Qwen (llama-server)
+#  2) Local API (Flask)
+#  3) RAW OCR worker
+#  4) AI Interpreter
+#  5) bot.py
+# ======================================================
+
+BASE="/data/data/com.termux/files/home/blt_bot"
+LOGDIR="$BASE/logs"
+mkdir -p "$LOGDIR"
+
+QWEN_BIN="/data/data/com.termux/files/home/llama.cpp/build/bin/llama-server"
+MODEL="/data/data/com.termux/files/home/models/Qwen2.5-3B-Instruct-Q4_K_M.gguf"
+
+echo "=== Inside tmux: BLT-bot startup ==="
+echo "Date: $(date)"
+echo "----------------------------------------"
+
+#########################################
+# 1) QWEN
+#########################################
+echo "[1/5] Starting Qwen..."
+$QWEN_BIN -m "$MODEL" -c 2048 -t 6 --parallel 2 --cont-batching --mlock --no-mmap --port 8080 \
+    >> "$LOGDIR/qwen.log" 2>&1 &
+
+sleep 3
+echo "Qwen started."
+
+#########################################
+# 2) LOCAL API
+#########################################
+echo "[2/5] Starting Local API..."
+cd "$BASE/local_api"
+
+/data/data/com.termux/files/usr/bin/python3 api.py \
+    >> "$LOGDIR/api.log" 2>&1 &
+
+sleep 1
+echo "API started."
+
+#########################################
+# 3) RAW OCR WORKER
+#########################################
+echo "[3/5] Starting RAW OCR Worker..."
+
+cd "$BASE/ocr"
+
+/data/data/com.termux/files/usr/bin/python3 worker.py \
+    >> "$LOGDIR/worker_raw.log" 2>&1 &
+
+echo "RAW worker started."
+
+#########################################
+# 4) AI INTERPRETER
+#########################################
+echo "[4/5] Starting AI Interpreter..."
+
+cd "$BASE/ocr"
+
+/data/data/com.termux/files/usr/bin/python3 interpreter.py \
+    >> "$LOGDIR/worker_ai.log" 2>&1 &
+
+echo "Interpreter started."
+
+#########################################
+# 5) BOT.PY
+#########################################
+echo "[5/5] Starting bot.py..."
+
+cd "$BASE"
+
+/data/data/com.termux/files/usr/bin/python3 bot.py \
+    >> "$LOGDIR/bot.log" 2>&1 &
+
+echo "bot.py started."
+
+echo "----------------------------------------"
+echo "All services running in background."
+
+# KEEP TMUX SESSION ALIVE
+echo "BLT-bot is running. Press Ctrl+B then D to detach."
+tail -f /dev/null

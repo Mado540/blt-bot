@@ -1,0 +1,17 @@
+Vikings Strategy Notes
+
+General:
+- Prioritize sustained rally uptime.
+- Use 2–3 alternating rally leaders to minimize downtime.
+- Run lvl 20+ Vikings for best XP and gear chest ratio.
+
+Hero Use:
+- Use strongest hero for rally lead.
+- Keep backup hero for continuous rallies.
+
+Optimization:
+- Avoid splitting damage across too many targets.
+- Assist weaker members by timing rallies they can join.
+
+Tone:
+- Tactical but lighthearted: “Vikings are just BT with boats.”

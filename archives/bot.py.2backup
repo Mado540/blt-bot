@@ -1,0 +1,165 @@
+import discord
+from discord import app_commands
+import aiohttp
+import asyncio
+import os
+
+from config import DISCORD_TOKEN, DATA_PATH, PROMPT_FILE
+
+# -------------------------------
+# LOAD SYSTEM PROMPT (MadOS Fork)
+# -------------------------------
+def load_system_prompt():
+    if not os.path.exists(PROMPT_FILE):
+        return "You are BLT-bot, based on MadOS principles."
+    with open(PROMPT_FILE, "r", encoding="utf-8") as f:
+        return f.read()
+
+SYSTEM_PROMPT = load_system_prompt()
+
+# Channels where BLT-bot should reply to normal messag>
+ALLOWED_CHANNELS = {
+    1376409374263873546,   # Announcements
+    1399681073977491463,   # bt participants
+    1370832149170884780    # general
+}
+
+# -------------------------------
+# BUILD FULL CONTEXT
+# -------------------------------
+def build_context():
+    context = SYSTEM_PROMPT + "\n\n=== BLT DATA (LIMITED) ===\n"
+
+    if not os.path.exists(DATA_PATH):
+        return context
+
+    max_chars = 2000     # limit context for speed
+    current = 0
+
+    for fname in os.listdir(DATA_PATH):
+        if current >= max_chars:
+            context += "\n--- CONTEXT TRUNCATED FOR SPEED ---\n"
+            break
+
+        path = os.path.join(DATA_PATH, fname)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+                add = text[:2000]          # limit each file
+                context += f"\n--- {fname} ---\n{add}\n"
+                current += len(add)
+        except:
+            pass
+
+    return context
+
+# -------------------------------
+# QWEN VIA LLAMA SERVER
+# -------------------------------
+async def ask_qwen(prompt):
+    async with aiohttp.ClientSession() as session:
+
+        payload = {
+            "prompt": prompt,
+
+            # SUPER-OPTIMIZED FOR 3B
+            "n_predict": 200,          # Sweet spot for speed + quality
+            "temperature": 0.25,      # Very stable, MadOS-like
+            "top_k": 20,              # Faster sampling, less CPU load
+            "top_p": 0.85,            # Balanced entropy
+            "repeat_penalty": 1.08,   # Reduces looping
+            "cache_prompt": True,     # HUGE speedup for 3B
+
+            # Absolute safe stop tokens
+            "stop": ["<|im_end|>", "</s>"]
+        }
+
+        try:
+            async with session.post(
+                "http://127.0.0.1:8080/completion",
+                json=payload
+            ) as resp:
+                data = await resp.json()
+                return data.get("content", "NO RESPONSE")
+
+        except Exception as e:
+            return f"QWEN ERROR: {e}"
+
+# -------------------------------
+# DISCORD BOT SETUP
+# -------------------------------
+intents = discord.Intents.default()
+intents.message_content = True
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
+
+# -------------------------------
+# SLASH COMMANDS
+# -------------------------------
+@tree.command(name="bt", description="Show latest Bear Trap info.")
+async def bt(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    prompt = build_context() + "\n\nProvide latest Bear Trap summary."
+    out = await ask_qwen(prompt)
+    await interaction.followup.send(out)
+
+@tree.command(name="calendar", description="Show BLT event calendar.")
+async def calendar(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    prompt = build_context() + "\n\nList the full event calendar."
+    out = await ask_qwen(prompt)
+    await interaction.followup.send(out)
+
+@tree.command(name="vikings", description="Show Vikings info.")
+async def vikings(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    prompt = build_context() + "\n\nProvide Vikings summary."
+    out = await ask_qwen(prompt)
+    await interaction.followup.send(out)
+
+@tree.command(name="kvk", description="Show KvK info.")
+async def kvk(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    prompt = build_context() + "\n\nProvide KvK history and insights."
+    out = await ask_qwen(prompt)
+    await interaction.followup.send(out)
+
+@tree.command(name="chat", description="Chat with MadOS (general conversation).")
+async def chat(interaction: discord.Interaction, message: str):
+    await interaction.response.defer(thinking=True)
+
+    prompt = f"{SYSTEM_PROMPT}\n\nUser: {message}"
+
+    result = await ask_qwen(prompt)
+    await interaction.followup.send(result)
+# -------------------------------
+# STARTUP
+# -------------------------------
+@client.event
+async def on_message(message):
+    # Ignore bot messages
+    if message.author.bot:
+        return
+
+    # Only respond in allowed channels
+    if message.channel.id not in ALLOWED_CHANNELS:
+        return
+
+    # Optional: Only reply when bot is mentioned
+    if client.user not in message.mentions:
+        return
+
+    await message.channel.typing()
+
+    prompt = f"{SYSTEM_PROMPT}\n\nUser says: {message.content}"
+    response = await ask_qwen(prompt)
+
+    await message.reply(response[:1800])  # Discord safety limit
+
+@client.event
+async def on_ready():
+    print(f"BLT-bot logged in as {client.user}")
+    await tree.sync()
+    print("Slash commands synced.")
+
+client.run(DISCORD_TOKEN)

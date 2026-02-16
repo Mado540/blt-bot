@@ -1,0 +1,237 @@
+import discord
+from discord import app_commands
+import aiohttp
+import asyncio
+import os
+from collections import defaultdict
+from time import time
+
+from config import DISCORD_TOKEN, DATA_PATH, PROMPT_FILE
+
+# ───────────────────────────────────────────────
+# COOLDOWN GLOBALS
+# ───────────────────────────────────────────────
+LAST_USE = defaultdict(float)
+COOLDOWN_SEC = 25
+
+GUILD_ID = 1370832148319305898  # your guild
+
+# -------------------------------
+# LOAD SYSTEM PROMPT (MadOS Fork)
+# -------------------------------
+def load_system_prompt():
+    if not os.path.exists(PROMPT_FILE):
+        return "You are BLT-bot, based on MadOS principles."
+    with open(PROMPT_FILE, "r", encoding="utf-8") as f:
+        return f.read()
+
+SYSTEM_PROMPT = load_system_prompt()
+
+# Channels where BLT-bot should reply to normal messages
+ALLOWED_CHANNELS = {
+    1376409374263873546,
+    1399681073977491463,
+    1370832149170884780
+}
+
+# -------------------------------
+# BUILD CONTEXT (BLT-specific)
+# -------------------------------
+def build_context(max_files=4):
+    context = SYSTEM_PROMPT + "\n\n=== BLT DATA (LIMITED) ===\n"
+    if not os.path.exists(DATA_PATH):
+        return context
+
+    max_chars = 2200
+    used = 0
+
+    files = sorted(
+        [f for f in os.listdir(DATA_PATH)
+         if os.path.isfile(os.path.join(DATA_PATH, f))],
+        key=lambda x: os.path.getmtime(os.path.join(DATA_PATH, x)),
+        reverse=True
+    )[:max_files]
+
+    for fname in files:
+        if used >= max_chars:
+            context += "\n--- CONTEXT TRUNCATED FOR SPEED ---\n"
+            break
+
+        path = os.path.join(DATA_PATH, fname)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+                part = text[:1800]
+                context += f"\n--- {fname} ---\n{part}\n"
+                used += len(part)
+        except:
+            pass
+
+    return context
+
+# -------------------------------
+# QWEN VIA LLAMA SERVER
+# -------------------------------
+async def ask_qwen(prompt):
+    async with aiohttp.ClientSession() as session:
+        payload = {
+            "prompt": prompt,
+            "n_predict": 280,
+            "temperature": 0.48,
+            "top_k": 35,
+            "top_p": 0.92,
+            "min_p": 0.06,
+            "repeat_penalty": 1.12,
+            "cache_prompt": True,
+            "stop": ["<|im_end|>", "</s>", "\nUser:", "User:"]
+        }
+        try:
+            async with session.post(
+                "http://127.0.0.1:8080/completion",
+                json=payload
+            ) as resp:
+                data = await resp.json()
+                return data.get("content", "No response from Qwen").strip()
+        except Exception as e:
+            return f"⚠️ Qwen is taking a nap: {str(e)[:120]}"
+
+# -------------------------------
+# DISCORD BOT SETUP
+# -------------------------------
+intents = discord.Intents.default()
+intents.message_content = True
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
+
+# -------------------------------
+# SAFE SEND HELPER
+# -------------------------------
+async def slash_send(interaction, text):
+    """Prevents slash reply failures."""
+    try:
+        return await interaction.followup.send(text)
+    except:
+        try:
+            return await interaction.response.send_message(text)
+        except:
+            return None
+
+# -------------------------------
+# COOLDOWN HELPER
+# -------------------------------
+async def handle_cooldown(interaction):
+    now = time()
+    uid = interaction.user.id
+    if now - LAST_USE[uid] < COOLDOWN_SEC:
+        await interaction.response.send_message(
+            f"⏳ Chill ~{COOLDOWN_SEC}s",
+            ephemeral=True
+        )
+        return True
+    LAST_USE[uid] = now
+    return False
+
+# -------------------------------
+# SLASH COMMANDS
+# -------------------------------
+
+@tree.command(name="bt", description="Show latest Bear Trap info.")
+async def bt(interaction: discord.Interaction):
+    if await handle_cooldown(interaction): return
+    await interaction.response.defer(thinking=True)
+
+    prompt = build_context() + "\n\nProvide latest Bear Trap summary."
+    out = await ask_qwen(prompt)
+    await slash_send(interaction, out[:1900])
+
+
+@tree.command(name="calendar", description="Show BLT event calendar.")
+async def calendar(interaction):
+    if await handle_cooldown(interaction): return
+    await interaction.response.defer(thinking=True)
+
+    prompt = build_context() + "\n\nList the full event calendar."
+    out = await ask_qwen(prompt)
+    await slash_send(interaction, out[:1900])
+
+
+@tree.command(name="vikings", description="Show Vikings info.")
+async def vikings(interaction):
+    if await handle_cooldown(interaction): return
+    await interaction.response.defer(thinking=True)
+
+    prompt = build_context() + "\n\nProvide Vikings summary."
+    out = await ask_qwen(prompt)
+    await slash_send(interaction, out[:1900])
+
+
+@tree.command(name="kvk", description="Show KvK info.")
+async def kvk(interaction):
+    if await handle_cooldown(interaction): return
+    await interaction.response.defer(thinking=True)
+
+    prompt = build_context() + "\n\nProvide KvK history and insights."
+    out = await ask_qwen(prompt)
+    await slash_send(interaction, out[:1900])
+
+# -------------------------------------------------
+# NEW /chat — conversational philosophical humor
+# -------------------------------------------------
+@tree.command(name="chat", description="Talk with a philosophical, humorous MadOS personality.")
+async def chat(interaction: discord.Interaction, message: str):
+    if await handle_cooldown(interaction): return
+    await interaction.response.defer(thinking=True)
+
+    PERSONALITY = """
+You are MadOS-ChatMode:
+A philosophical, humorous, calm conversationalist.
+
+Rules:
+- Use dry humor, not slapstick.
+- Be reflective, thoughtful, slightly sarcastic.
+- Don’t sound like a robot; sound like a tired but wise strategist.
+- Answer ANY topic: life, people, chaos, randomness, emotions, etc.
+- Avoid BLT-specific context unless user mentions it.
+"""
+
+    prompt = f"{PERSONALITY}\n\nUser: {message}\nBot:"
+    out = await ask_qwen(prompt)
+    await slash_send(interaction, out[:1900])
+
+# -------------------------------
+# NORMAL MESSAGE HANDLING
+# -------------------------------
+@client.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    if message.channel.id not in ALLOWED_CHANNELS:
+        return
+
+    if client.user not in message.mentions and not message.content.lower().startswith("!blt"):
+        return
+
+    now = time()
+    uid = message.author.id
+    if now - LAST_USE[uid] < COOLDOWN_SEC:
+        await message.reply(f"⏳ Chill ~{COOLDOWN_SEC}s")
+        return
+    LAST_USE[uid] = now
+
+    await message.channel.typing()
+
+    prompt = f"{SYSTEM_PROMPT}\n\nUser says: {message.content}"
+    out = await ask_qwen(prompt)
+    await message.reply(out[:1800])
+
+# -------------------------------
+# STARTUP
+# -------------------------------
+@client.event
+async def on_ready():
+    print(f"BLT-bot logged in as {client.user}")
+    await tree.sync(guild=discord.Object(id=GUILD_ID))
+    print("Slash commands synced to guild.")
+
+client.run(DISCORD_TOKEN)

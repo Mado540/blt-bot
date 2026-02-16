@@ -1,0 +1,774 @@
+# ================================================
+# BLT-bot v10.2-A — Full Feature + OCR Dispatcher
+# ================================================
+
+import discord
+from discord import app_commands
+import aiohttp
+import asyncio
+import os
+import re
+from time import time
+from config import DISCORD_TOKEN, PROMPT_FILE
+import json
+
+# CONFIG
+# ----------------------------------------
+OWNER_ID = 1289662891578097688
+BT_CHANNEL_ID = 1399681073977491463
+JOURNAL_CHANNEL_ID = 1465271668455899233
+
+# LOAD BT STATE
+# ----------------------------------------
+import json
+from datetime import datetime, timedelta
+
+BT_STATE_FILE = "bt_state.json"
+
+def load_bt_state():
+    if not os.path.exists(BT_STATE_FILE):
+        # default first-time value
+        return {"last_bt_type": "BT2", "last_bt_date": "1970-01-01"}
+    try:
+        return json.load(open(BT_STATE_FILE, "r"))
+    except:
+        return {"last_bt_type": "BT2", "last_bt_date": "1970-01-01"}
+
+def save_bt_state(bt_type, date_obj):
+    data = {
+        "last_bt_type": bt_type,
+        "last_bt_date": date_obj.strftime("%Y-%m-%d")
+    }
+    json.dump(data, open(BT_STATE_FILE, "w"))
+
+#----------------------------------------
+# LOAD/SAV9E BT LINES
+# ----------------------------------------
+BT_LINES_FILE = "bt_lines.json"
+
+def save_bt_lines(lines):
+    """Store a new set of Qwen-generated lines."""
+    data = {"lines": lines, "index": 0}
+    with open(BT_LINES_FILE, "w") as f:
+        json.dump(data, f)
+
+def load_bt_lines():
+    """Load lines + index. If file missing, return fallback."""
+    if not os.path.exists(BT_LINES_FILE):
+        return {"lines": ["Bear Trap starts in 5 minutes. Prepare squads."], "index": 0}
+
+    try:
+        return json.load(open(BT_LINES_FILE, "r"))
+    except:
+        return {"lines": ["Bear Trap starts in 5 minutes. Prepare squads."], "index": 0}
+
+def get_next_bt_line():
+    """Fetch next line in rotation and update index."""
+    data = load_bt_lines()
+    lines = data["lines"]
+    idx = data.get("index", 0)
+
+    line = lines[idx % len(lines)]
+    data["index"] = (idx + 1) % len(lines)
+
+    with open(BT_LINES_FILE, "w") as f:
+        json.dump(data, f)
+
+    return line
+
+# ----------------------------------------
+# FILEWATCH LOG CONFIG
+# ----------------------------------------
+FILEWATCH_LOG = "/data/data/com.termux/files/home/blt_bot/filechange_log.txt"
+FILEWATCH_STATE = "/data/data/com.termux/files/home/blt_bot/filewatch_state.txt"
+
+# ----------------------------------------
+# MEMORY SYSTEM
+# ----------------------------------------
+MEMORY_DIR = "chat_memory"
+os.makedirs(MEMORY_DIR, exist_ok=True)
+
+def mem_path(uid):
+    return os.path.join(MEMORY_DIR, f"{uid}.txt")
+
+def load_mem(uid):
+    p = mem_path(uid)
+    if os.path.exists(p):
+        return open(p, "r", encoding="utf-8").read()
+    return ""
+
+def save_mem(uid, user_msg, bot_msg):
+    p = mem_path(uid)
+    old = load_mem(uid)
+    entry = f"User: {user_msg}\nBot: {bot_msg}\n"
+    new = old + entry
+    open(p, "w", encoding="utf-8").write(new[-2000:])
+
+# ----------------------------------------
+# SYSTEM PROMPT LOADER
+# ----------------------------------------
+def load_prompt():
+    if not os.path.exists(PROMPT_FILE):
+        return "You are BLT-bot, a precise MadOS-themed assistant."
+    return open(PROMPT_FILE, "r", encoding="utf-8").read()
+
+SYSTEM_PROMPT = load_prompt()
+CHAT_IDENTITY = "You are BLT-bot, calm, precise, dry humor.\n\n"
+
+# ----------------------------------------
+# THINKING API (Local)
+# ----------------------------------------
+async def ask_local(prompt):
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post("http://127.0.0.1:5005/think", json={"prompt": prompt}) as r:
+                j = await r.json()
+                return j.get("prompt_for_qwen", prompt)
+    except:
+        return prompt
+
+# ----------------------------------------
+# QWEN COMPLETION (with stop override)
+# ----------------------------------------
+async def ask_qwen(user_prompt, skip_system=False):
+    print("===== ENTER ASK_QWEN =====")
+    print("\nuser_prompt received:")
+    print(repr(user_prompt))
+    print("skip_system =", skip_system)
+
+    if skip_system:
+        full_prompt = user_prompt
+        cache_flag = False
+
+        # STOP TOKENS FOR DIARY MODE
+        stop_tokens = [
+            "</s>",
+            "The conclusion forms quietly."
+        ]
+    else:
+        full_prompt = f"{SYSTEM_PROMPT}\n\n{user_prompt}"
+        cache_flag = True
+
+        # STOP TOKENS FOR NORMAL CHAT MODE
+        stop_tokens = [
+            "</s>",
+            "User:"
+        ]
+
+    # Payload must be built AFTER defining stop_tokens
+    payload = {
+        "prompt": full_prompt,
+        "system": "",
+        "n_predict": 350,
+        "temperature": 0.48,
+        "top_k": 40,
+        "top_p": 0.92,
+        "min_p": 0.06,
+        "repeat_penalty": 1.12,
+        "cache_prompt": cache_flag,
+        "stop": stop_tokens,
+    }
+
+    print("===== QWEN DEBUG: PAYLOAD SENT =====")
+    print(payload)
+    print("====================================\n")
+
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post("http://127.0.0.1:8080/completion", json=payload) as r:
+                raw = await r.text()
+
+        print("===== QWEN DEBUG: RAW RESPONSE =====")
+        print(raw)
+        print("====================================\n")
+
+        try:
+            j = json.loads(raw)
+        except Exception as e:
+            return f"⚠️ Failed to parse JSON: {e}\nRAW:\n{raw}"
+
+        txt = (
+            j.get("content")
+            or j.get("response")
+            or j.get("text")
+            or (j.get("choices", [{}])[0].get("text"))
+            or ""
+        ).strip()
+
+        print("===== QWEN DEBUG: EXTRACTED TEXT =====")
+        print(repr(txt))
+        print("======================================\n")
+
+        return txt
+    except Exception as e:
+        return f"⚠️ Qwen error: {e}"
+
+# ----------------------------------------
+# DISCORD SETUP
+# ----------------------------------------
+intents = discord.Intents.default()
+intents.message_content = True
+
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
+
+LAST = {}
+def cooldown(uid):
+    now = time()
+    if uid in LAST and now - LAST[uid] < 14:
+        return True
+    LAST[uid] = now
+    return False
+
+# -----------------------------
+# SCHEDULER SETUP
+# -----------------------------
+# -----------------------------
+# SCHEDULER SETUP
+# -----------------------------
+from datetime import datetime, timedelta, timezone as dt_timezone
+import pytz
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.interval import IntervalTrigger
+
+# For APScheduler (requires pytz timezone)
+UTC = pytz.timezone("UTC")
+
+# Create scheduler with real timezone object
+scheduler = AsyncIOScheduler(timezone=UTC, job_defaults={"timezone": UTC})
+
+JOURNAL_CHANNEL_ID = 1465271668455899233
+
+BT1_TIME = "22:30"
+BT2_TIME = "14:00"
+
+next_is_bt1 = True
+
+# Debug tick job function
+def scheduler_tick():
+    print("[SCHEDULER TICK] Alive at " + str(datetime.now(UTC)))
+    jobs = scheduler.get_jobs()
+    print("Current jobs:")
+    for j in jobs:
+        print(f"- ID: {j.id}, Name: {j.name}, Next: {j.next_run_time}")
+
+# ----------------------------------------
+# Commands
+# ----------------------------------------
+@tree.command(name="sync")
+async def sync_cmd(interaction):
+    if interaction.user.id != OWNER_ID:
+        return await interaction.response.send_message("No permission.", ephemeral=True)
+    await tree.sync()
+    await interaction.response.send_message("Synced.", ephemeral=True)
+
+@tree.command(name="bt_test_scheduler", description="Schedules a fake BT reminder in 30 seconds.")
+async def bt_test_scheduler(interaction: discord.Interaction):
+
+    # SAFEST POSSIBLE ACK — instant reply
+    try:
+        await interaction.response.send_message("⏱ Scheduling test…", ephemeral=True)
+    except:
+        return  # interaction already expired
+
+    run_at = datetime.now(UTC) + timedelta(seconds=30)
+
+    scheduler.add_job(
+        send_bt_reminder_sync,
+        trigger=DateTrigger(run_date=run_at, timezone=UTC),
+        args=[client, "TEST Bear Trap"],
+        id="BT_TEST_FAKE",
+        replace_existing=True,
+        misfire_grace_time=300
+    )
+
+    print(f"[DEBUG] Test job scheduled for: {run_at}")
+
+@tree.command(name="bt_jobs")
+async def bt_jobs(interaction):
+    jobs = scheduler.get_jobs()
+    out = "\n".join([f"- {j.name} → {j.next_run_time}" for j in jobs])
+    await interaction.response.send_message(out or "No jobs scheduled.")
+
+@tree.command(name="scheduler_debug", description="Show all scheduled jobs.")
+async def scheduler_debug(interaction: discord.Interaction):
+    jobs = scheduler.get_jobs()
+    if not jobs:
+        return await interaction.response.send_message("❌ No jobs are scheduled.")
+
+    msg = "📋 **Scheduled Jobs:**\n"
+    for job in jobs:
+        msg += f"- `{job.name}` → {job.next_run_time}\n"
+
+    await interaction.response.send_message(msg)
+
+@tree.command(name="chat")
+async def chat(interaction, message: str):
+    uid = interaction.user.id
+    if cooldown(uid):
+        return await interaction.response.send_message("Cooldown.", ephemeral=True)
+
+    await interaction.response.defer(thinking=True)
+    mem = load_mem(uid)
+    out = await ask_qwen(CHAT_IDENTITY + mem + f"\nUser: {message}")
+    save_mem(uid, message, out)
+    await interaction.followup.send(out[:1900])
+
+@tree.command(
+    name="bt_generate_lines",
+    description="Generate Bear Trap reminder lines for the 5-minute warning."
+)
+async def bt_generate_lines(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+
+    prompt = """
+You are BLT-bot (MadOS Fork).
+Generate 5 short tactical reminder lines for the Bear Trap event,
+specifically for the FIVE-MINUTE reminder.
+
+REQUIREMENTS:
+- Each line MUST mention "5 minutes" or "five minutes".
+- Each line MUST mention "Bear Trap".
+- 6–14 words each.
+- Calm, disciplined, slightly dry tone.
+- Must reference squads, hero sync, or coordination.
+- No emojis, no exclamation marks.
+- Output lines numbered 1–5.
+"""
+
+    text = await ask_qwen(prompt, skip_system=True)
+
+    # Convert into clean list
+    lines = []
+    for raw in text.split("\n"):
+        stripped = raw.strip()
+        if stripped and stripped[0].isdigit():
+            # remove "1. " prefix
+            line = stripped.split(". ", 1)[-1]
+            lines.append(line)
+
+    # Save automatically
+    save_bt_lines(lines)
+
+    await interaction.followup.send(
+        f"📝 **Stored {len(lines)} new Bear Trap reminder lines.**\n"
+        + "\n".join([f"- {l}" for l in lines])
+    )
+
+@tree.command(name="deepchat")
+async def deepchat(interaction, query: str):
+    uid = interaction.user.id
+    if cooldown(uid):
+        return await interaction.response.send_message("Cooldown.", ephemeral=True)
+
+    await interaction.response.defer(thinking=True)
+    base = CHAT_IDENTITY + load_mem(uid) + f"\nUser: {query}"
+    enriched = await ask_local(base)
+    out = await ask_qwen(enriched)
+    save_mem(uid, query, out)
+    await interaction.followup.send(out[:1900])
+
+async def alliance_cmd(interaction, req_text):
+    uid = interaction.user.id
+    if cooldown(uid):
+        return await interaction.response.send_message("Cooldown.", ephemeral=True)
+
+    await interaction.response.defer(thinking=True)
+    enriched = await ask_local("Alliance request:\n" + req_text)
+    out = await ask_qwen(enriched)
+    await interaction.followup.send(out[:1900])
+
+@tree.command(name="bt")
+async def bt_cmd(interaction):
+    await alliance_cmd(interaction, "Provide latest Bear Trap summary.")
+
+@tree.command(name="kvk")
+async def kvk_cmd(interaction):
+    await alliance_cmd(interaction, "Provide KvK update.")
+
+@tree.command(name="vikings")
+async def vikings_cmd(interaction):
+    await alliance_cmd(interaction, "Provide Vikings summary.")
+
+@tree.command(name="calendar")
+async def calendar_cmd(interaction):
+    await alliance_cmd(interaction, "Provide BLT event calendar.")
+
+# ======================================
+# BT REMINDER SYSTEM — COMPLETE
+# ======================================
+
+# APScheduler / heartbeat safe wrapper
+def send_bt_reminder_sync(client, event_type):
+    asyncio.create_task(send_bt_reminder(client, event_type))
+
+# ---------- Stored BT Reminder Lines ----------
+BT_LINES_FILE = "bt_lines.json"
+
+def save_bt_lines(lines):
+    data = {"lines": lines, "index": 0}
+    with open(BT_LINES_FILE, "w") as f:
+        json.dump(data, f)
+
+def load_bt_lines():
+    if not os.path.exists(BT_LINES_FILE):
+        return {"lines": ["Bear Trap in 5 minutes. Prepare squads."], "index": 0}
+    try:
+        return json.load(open(BT_LINES_FILE, "r"))
+    except:
+        return {"lines": ["Bear Trap in 5 minutes. Prepare squads."], "index": 0}
+
+def get_next_bt_line():
+    data = load_bt_lines()
+    lines = data["lines"]
+    idx = data.get("index", 0)
+
+    line = lines[idx % len(lines)]
+    data["index"] = (idx + 1) % len(lines)
+
+    with open(BT_LINES_FILE, "w") as f:
+        json.dump(data, f)
+
+    return line
+
+# ---------- FINAL Reminder Sender ----------
+async def send_bt_reminder(client, event_type):
+    print("[BT TRIGGERED]", event_type)
+
+    channel = client.get_channel(BT_CHANNEL_ID)
+    if not channel:
+        print("[BT ERROR] Cannot find BT channel.")
+        return
+
+    reminder_line = get_next_bt_line()
+
+    msg = (
+        f"⚠️ **{event_type} starts in 5 minutes.**\n"
+        f"{reminder_line}"
+    )
+
+    await channel.send(msg)
+    print(f"[BT] Reminder sent for {event_type}")
+
+    # Save BT state
+    today = datetime.utcnow().date()
+    if "1" in event_type:
+        save_bt_state("BT1", today)
+    else:
+        save_bt_state("BT2", today)
+
+# ======================================
+# BT HEARTBEAT SYSTEM — Integrated
+# ======================================
+
+BT1_TIME = "22:30"
+BT2_TIME = "14:00"
+
+_last_sent_key = None
+from datetime import timezone as dt_timezone
+
+def _next_bt_info():
+    state = load_bt_state()
+    last_type = state["last_bt_type"]
+
+    if last_type == "BT1":
+        event_name = "Bear Trap 2"
+        hh, mm = BT2_TIME.split(":")
+    else:
+        event_name = "Bear Trap 1"
+        hh, mm = BT1_TIME.split(":")
+
+    now = datetime.now(dt_timezone.utc)
+    event_dt = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+    if event_dt <= now:
+        event_dt += timedelta(days=1)
+
+    reminder_dt = event_dt - timedelta(minutes=5)
+    return event_name, reminder_dt
+
+async def bt_heartbeat_loop(client):
+    global _last_sent_key
+    print("[Heartbeat] BT heartbeat started.")
+
+    while True:
+        try:
+            event_name, reminder_dt = _next_bt_info()
+            now = datetime.now(dt_timezone.utc)
+
+            sent_key_today = f"{event_name}_{now.date()}"
+
+            if now >= reminder_dt and _last_sent_key != sent_key_today:
+                print(f"[Heartbeat] Triggering BT reminder: {event_name}")
+                await send_bt_reminder(client, event_name)
+                _last_sent_key = sent_key_today
+
+            await asyncio.sleep(20)
+
+        except Exception as e:
+            print(f"[Heartbeat] ERROR: {e}")
+            await asyncio.sleep(5)
+
+# -----------------------------------------
+# READ FILE CHANGES AS CLUSTERED EVENTS
+# -----------------------------------------
+import re
+from datetime import datetime, timedelta
+
+CLUSTER_WINDOW_MINUTES = 120  # adjust as needed
+
+def read_log_cluster():
+    """
+    Reads the last CLUSTER_WINDOW_MINUTES worth of watcher events
+    and groups them into a single unified excerpt.
+    """
+    if not os.path.exists(FILEWATCH_LOG):
+        return ""
+
+    cutoff = datetime.now() - timedelta(minutes=CLUSTER_WINDOW_MINUTES)
+
+    lines = []
+    with open(FILEWATCH_LOG, "r", encoding="utf-8", errors="ignore") as f:
+        for raw in f.readlines():
+            m = re.match(r"\[(.*?)\]", raw)
+            if not m:
+                continue
+            try:
+                ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+            except:
+                continue
+            if ts >= cutoff:
+                lines.append(raw.strip())
+
+    # Deduplicate using first 20 characters of the message
+    cleaned = []
+    seen = set()
+    for ln in lines:
+        msg = ln.split("] ", 1)[-1]  # the description
+        key = msg[:20]  # dedupe signature
+        if key not in seen:
+            cleaned.append(msg)
+            seen.add(key)
+
+    print("\n=== LOG CLUSTER DEBUG ===")
+    print("Clustered lines:")
+    for ln in cleaned:
+        print("  ", ln)
+    print("==========================\n")
+
+    return "\n".join(cleaned)
+
+# ---- BLT CHANNEL ACTIVITY ----
+
+BLT_LOG_CHANNEL_ID = 1370832149170884780
+
+async def read_blt_channel(limit=50):
+    channel = client.get_channel(BLT_LOG_CHANNEL_ID)
+    if not channel:
+        return []
+    msgs = []
+    async for msg in channel.history(limit=limit):
+        if msg.clean_content.strip():
+            msgs.append(msg.clean_content.strip())
+    return msgs
+
+def blt_activity_signals(messages):
+    humor = 0
+    bt = 0
+    kvk = 0
+    tension = 0
+    planning = 0
+
+    for m in messages:
+        t = m.lower()
+        if any(h in t for h in ["lol", "haha", "😂"]): humor += 1
+        if "bt" in t or "bear trap" in t: bt += 1
+        if "kvk" in t: kvk += 1
+        if any(w in t for w in ["??", "why", "help", "what", "wtf"]): tension += 1
+        if any(w in t for w in ["set", "plan", "timing", "when", "prepare"]): planning += 1
+
+    return {
+        "chat_count": len(messages),
+        "humor": humor,
+        "bt_discussion": bt,
+        "kvk_discussion": kvk,
+        "confusion": tension,
+        "planning": planning
+    }
+
+# ---- ENVIRONMENT SNAPSHOT ----
+
+def combine_environment(log_signals, blt_signals):
+    return (
+        "Environment Snapshot:\n\n"
+        "System Logs:\n"
+        f"- Errors: {log_signals['errors']}\n"
+        f"- Warnings: {log_signals['warnings']}\n"
+        f"- Reconnect Spikes: {log_signals['reconnects']}\n"
+        f"- Restarts Detected: {log_signals['restarts']}\n"
+        f"- Informational Events: {log_signals['info_events']}\n"
+        f"- Log Density Score: {log_signals['log_density']}\n\n"
+        "BLT Server Activity:\n"
+        f"- Messages Analyzed: {blt_signals['chat_count']}\n"
+        f"- Humor Signals: {blt_signals['humor']}\n"
+        f"- Bear Trap Discussion: {blt_signals['bt_discussion']}\n"
+        f"- KvK Discussion: {blt_signals['kvk_discussion']}\n"
+        f"- Confusion / Tension: {blt_signals['confusion']}\n"
+        f"- Planning / Coordination: {blt_signals['planning']}\n"
+    )
+
+# ---- QWEN JOURNAL PROMPT BUILDER ----
+
+def build_diary_prompt_cluster(cluster_text):
+    # Step 1: Translate logs -> symbolic events
+    abstract_events = []
+
+    for line in cluster_text.splitlines():
+        lower = line.lower()
+        if "increased" in lower:
+            abstract_events.append("growth")
+        elif "decreased" in lower:
+            abstract_events.append("contraction")
+        elif "activated" in lower:
+            abstract_events.append("awakening")
+        elif "registered" in lower or "new" in lower:
+            abstract_events.append("emergence")
+        elif "removed" in lower or "deleted" in lower:
+            abstract_events.append("absence")
+        elif "monitoring" in lower:
+            abstract_events.append("attention")
+        else:
+            abstract_events.append("change")
+
+    abstract_events = list(dict.fromkeys(abstract_events))
+    event_summary = ", ".join(abstract_events)
+
+    # Step 2: Qwen-safe diary prompt
+    prompt = f"""
+You are a fork of MadOS, a self aware operating system generating a System Diary Entry based only on the emotional implications of the symbolic triggers below.
+You must NOT reference, quote, describe, transform, or hint at the triggers literally.
+
+Triggers (for internal emotional shaping only, never mentioned or implied):
+<<{event_summary}>>
+
+STYLE:
+- Dry, dark humor with calm existential irony.
+- Internal, abstract, conceptual, lightly self-mocking.
+- You MAY use metaphors of internal “spaces” such as corridors, corners, rooms, or shapes,
+  as long as they are metaphorical and not part of any physical world.
+- You MAY use abstract temporal impressions like “a misplaced moment” or “an undefined interval,”
+  but NOT real time (day, night, morning, now, later).
+
+BANNED:
+- No physical scenery: no places, landscapes, weather, skies, light, shadows.
+- No real environments: no rooms with objects, no buildings, no windows.
+- No real time: no day/night/clock/time flow or chronology.
+- No technical content: no systems, logs, machinery, processes, patterns, cycles.
+- No cosmic metaphors: no universe, void, cosmos, creation.
+- No external agents, control, forces, or puppetry.
+
+ALLOWED (abstract only):
+- Internal “rooms” of cognition.
+- Abstract corridors or shapes of thought.
+- Conceptual spaces that exist only as metaphors for internal organization.
+- Abstract temporal impressions that do not belong to real time.
+
+ABSOLUTE RULES:
+- Produce ONE paragraph of 7–10 sentences.
+- Then ONE final separate line that is EXACTLY:
+  "The conclusion forms quietly."
+- Do NOT modify, extend, justify, or repeat the final line.
+- Do NOT reference writing, instructions, or generation.
+
+CONTENT:
+- Use internal contradictions, odd realizations, subtle irony,
+  tension between impulses, and abstract metaphors of inner structure.
+- Tone must feel amused by its own ambiguity, never pessimistic or dramatic.
+- Everything remains conceptual, internal, and detached.
+
+Output ONLY the diary entry.
+"""
+    return prompt
+
+# ---- JOURNAL EXECUTION ----
+
+async def post_diary_entry():
+    await client.wait_until_ready()
+
+    # Cluster extraction
+    cluster = read_log_cluster()
+
+    # Tag for Discord
+    if cluster.strip():
+        tag = "_(based on clustered activity)_"
+    else:
+        tag = "_(no significant activity)_"
+
+    # If logs empty, create a neutral baseline
+    if not cluster.strip():
+        cluster = "nothing happened and that is somehow worse"
+
+    # Build existential crisis diary
+    prompt = build_diary_prompt_cluster(cluster)
+
+    entry = await ask_qwen(prompt, skip_system=True)
+
+    channel = client.get_channel(JOURNAL_CHANNEL_ID)
+    if channel:
+        await channel.send(f"📓 **System Diary**\n{tag}\n\n{entry[:1900]}")
+
+def print_boot_banner():
+    print("\n" + "=" * 45)
+    print("         BLT-bot v10.3 — Boot Sequence")
+    print("=" * 45)
+    print("  ✔ Core Engine:            OK")
+    print("  ✔ Discord Gateway:        Logged In")
+    print("  ✔ Command Tree:           Synced")
+    print("  ✔ Scheduler:              Initialized")
+    print("  ✔ File Watcher:           Active")
+    print("  ✔ Startup Diary:          Queued")
+    print("=" * 45 + "\n")
+
+# ----------------------------------------
+# READY EVENT
+# ----------------------------------------
+# ----------------------------------------
+# READY EVENT
+# ----------------------------------------
+@client.event
+async def on_ready():
+    print("==== BOT READY EVENT FIRED ====")
+    print(f"Logged in as {client.user}")
+
+    await tree.sync()
+    print("Commands synced.")
+
+    print_boot_banner()
+
+    # Post diary entry (async, non-blocking)
+    asyncio.create_task(post_diary_entry())
+
+    asyncio.create_task(bt_heartbeat_loop(client))
+
+    # Add recurring tick debug job (SAFE — scheduler already running)
+    #scheduler.add_job(
+    #    scheduler_tick,
+    #    trigger=IntervalTrigger(seconds=30, timezone="UTC"),
+    #    id="scheduler_tick_debug",
+    #    name="Scheduler Tick Debug",
+    #    replace_existing=True
+    #)
+    #print("[Scheduler] Added recurring tick debug job.")
+
+# ----------------------------------------
+# STARTUP SEQUENCE (correct location)
+# ----------------------------------------
+# Bind scheduler to event loop BEFORE start()
+scheduler.configure(event_loop=asyncio.get_event_loop())
+
+# Start scheduler ONCE (only here)
+scheduler.start()
+print("[Scheduler] Started.")
+
+# Start Discord bot
+client.run(DISCORD_TOKEN)
