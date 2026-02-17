@@ -4,13 +4,23 @@
 
 import discord
 from discord import app_commands
+from discord.ext import commands
 import aiohttp
 import asyncio
 import os
 import re
-from time import time
-from config import DISCORD_TOKEN, PROMPT_FILE
 import json
+from time import time
+from dotenv import load_dotenv
+
+# ----------------------------
+# Load token
+# ----------------------------
+load_dotenv()
+TOKEN = os.getenv("DISCORD_TOKEN")
+
+if not TOKEN:
+    raise ValueError("No DISCORD_TOKEN found in .env")
 
 # ====================================
 # GLOBAL OCR STATE (ARM MODE)
@@ -181,6 +191,8 @@ def load_dm_active():
 def save_dm_active(data):
     with open(DM_ACTIVE_FILE, "w") as f:
         json.dump(data, f)
+
+PROMPT_FILE = "system_prompt.txt"
 
 # ----------------------------------------
 # SYSTEM PROMPT LOADER
@@ -1210,4 +1222,4 @@ scheduler.start()
 print("[Scheduler] Started.")
 
 # Start Discord bot
-client.run(DISCORD_TOKEN)
+client.run(TOKEN)
